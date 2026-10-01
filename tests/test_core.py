@@ -140,3 +140,40 @@ def test_overtime_pay_restday_tiers_and_limit():
         pass
     else:
         raise AssertionError("平日加班超過 4 小時應該報錯")
+
+
+# ── 函釋 ───────────────────────────────────────────────────
+
+INTERP_HTML = """<html><body>
+發文單位：<br>勞動部<br>發文字號：<br>勞動條 2字第
+      1140149454
+      號函<br>發文日期：<br>民國 115 年 01 月 09 日<br>資料來源：<br>勞動部<br>
+相關法條：<br>勞工請假規則 第 4、9 條<br>要　　旨：<br>病假工資與 1 日工資計算<br>
+主    旨：有關普通傷病假工資計算規定疑義。<br>說    明：一、以月工資總額除以 30 核計「1 日工資」。<br>
+正    本：直轄市及各縣市政府<br>共 1 筆 / 現在第 1 筆
+</body></html>"""
+
+
+def test_parse_interpretation_extracts_fields_and_drops_recipients():
+    a = sources.parse_interpretation("1140149454", "工資計算", INTERP_HTML)
+    assert a.title == "勞動條2字第1140149454號函"
+    assert a.chapter == "民國 115 年 01 月 09 日｜工資計算"
+    assert a.content.startswith("要旨：病假工資與 1 日工資計算")
+    assert "除以 30" in a.content
+    assert "直轄市" not in a.content
+
+
+def test_cited_hits_matches_interpretation_by_doc_number():
+    interp = Hit(5, "MOL_INTERP", "勞動部函釋（精選）", "interpretation", "1140149454", "勞動條2字第1140149454號函", "", None, 1)
+    old = Hit(6, "MOL_INTERP", "勞動部函釋（精選）", "interpretation", "0031343", "（89）台勞動二字第0031343號函", "", None, 1)
+    law = Hit(1, "N0030001", "勞動基準法", "law", "38", None, "", None, 1)
+    text = "依【函釋 勞動條2字第1140149454號、勞動基準法 第 38 條】；另見【函釋 （89）台勞動二字第0031343號】"
+    assert cited_hits(text, [law, old, interp]) == [interp, law, old]
+
+
+def test_cited_hits_keeps_guidance_title_with_punctuation_intact():
+    title = "勞工月中到、離職，當月工資如何計給？"
+    g1 = Hit(7, "GUIDANCE", "主管機關說明（精選）", "guidance", "1-2", title, f"主管機關說明〈{title}〉｜x｜一、到職", None, 1)
+    other = Hit(8, "N0030001", "勞動基準法", "law", "16", None, "", None, 1)
+    text = f"在職 2 日【說明〈{title}〉】"
+    assert cited_hits(text, [other, g1]) == [g1]

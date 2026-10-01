@@ -42,6 +42,12 @@ class Hit:
 
     @property
     def label(self) -> str:
+        if self.kind == "interpretation":
+            return f"勞動部函釋 {self.title}"
+        if self.kind == "guidance":
+            # 同一篇文章切成多段，標籤帶上段落名稱才分得出來
+            section = self.text.split("\n", 1)[0].rsplit("｜", 1)[-1]
+            return f"主管機關說明〈{self.title}〉{section}"
         name = "工作規則" if self.kind == "handbook" else self.law
         return f"{name} 第 {self.flno} 條" + (f"（{self.title}）" if self.title else "")
 
@@ -91,6 +97,13 @@ def explicit_refs(conn: sqlite3.Connection, query: str) -> list[int]:
     """問題裡直接寫「勞基法第 38 條」時，直接把那一條排第一，不靠檢索去猜。"""
     aliases = {"勞動基準法": ["勞基法"], "性別平等工作法": ["性平法"], "勞工退休金條例": ["勞退條例"]}
     ids = []
+    # 函釋文號（例如「勞動條2字第1140149454號」）：比對文號中的數字
+    for digits in re.findall(r"\d{6,}[A-Za-z]?", query):
+        row = conn.execute(
+            "SELECT a.id FROM articles a JOIN sources s ON s.code = a.code "
+            "WHERE s.kind = 'interpretation' AND a.flno LIKE ?", (f"%{digits}%",)).fetchone()
+        if row:
+            ids.append(row["id"])
     for flno in ARTICLE_REF_RE.findall(query):
         sql = "SELECT a.id, s.name, s.kind FROM articles a JOIN sources s ON s.code = a.code WHERE a.flno = ?"
         for r in conn.execute(sql, (flno,)):

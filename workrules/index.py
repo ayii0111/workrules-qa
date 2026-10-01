@@ -14,6 +14,12 @@ def article_text(row: sqlite3.Row) -> str:
     單看條文內容常常不知道出自哪部法規（例如「前項規定…」），
     帶上這些資訊後，檢索和 LLM 都比較能判斷，也方便引用。
     """
+    if row["kind"] == "interpretation":
+        # 函釋以文號識別，chapter 欄位存「發文日期｜主題」
+        return f"勞動部函釋 {row['title']}｜{row['chapter']}\n{row['content']}"
+    if row["kind"] == "guidance":
+        # 說明文章以標題識別，chapter 欄位存「發布機關 日期｜段落標題」
+        return f"主管機關說明〈{row['title']}〉｜{row['chapter']}\n{row['content']}"
     head = f"{row['name']} 第 {row['flno']} 條"
     if row["title"]:
         head += f"（{row['title']}）"

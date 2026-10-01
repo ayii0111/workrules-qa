@@ -29,8 +29,23 @@ def _step(conn: sqlite3.Connection, job: str, fn: Callable[[], int]) -> int:
         return 0
 
 
+def update_interpretations(conn: sqlite3.Connection) -> int:
+    # 先比對清單版本再抓：函釋要逐則請求，清單沒變就不必打擾對方網站
+    if sources.source_version(conn, sources.INTERP_CODE) == sources.interpretations_version():
+        return 0
+    return sources.save_source(conn, sources.fetch_interpretations())
+
+
+def update_guidance(conn: sqlite3.Connection) -> int:
+    if sources.source_version(conn, sources.GUIDANCE_CODE) == sources.file_version(config.GUIDANCE_PATH):
+        return 0
+    return sources.save_source(conn, sources.fetch_guidance())
+
+
 def update(conn: sqlite3.Connection):
     _step(conn, "laws", lambda: sum(sources.save_source(conn, s) for s in sources.fetch_laws(list(config.LAWS))))
     _step(conn, "handbook", lambda: sources.save_source(conn, sources.load_handbook()))
+    _step(conn, "interp", lambda: update_interpretations(conn))
+    _step(conn, "guidance", lambda: update_guidance(conn))
     _step(conn, "index", lambda: index.index_missing(conn))
     _step(conn, "embed", lambda: index.embed_missing(conn))

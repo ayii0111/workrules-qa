@@ -22,7 +22,7 @@ st.title("📘 規章與勞動法規問答助理")
 st.caption("員工與主管的請假、加班、特休、離職問題，依據公司工作規則與勞動法規回答，並附上條文出處。"
            "本站的公司工作規則為虛構範例。")
 
-tab_ask, tab_calc, tab_browse, tab_status = st.tabs(["💬 問答", "🧮 試算", "📚 條文查詢", "🗂️ 資料狀態"])
+tab_ask, tab_calc, tab_browse, tab_status = st.tabs(["💬 問答", "🧮 試算", "📚 條文與函釋", "🗂️ 資料狀態"])
 
 # ── 問答 ───────────────────────────────────────────────────
 EXAMPLES = [
@@ -120,26 +120,40 @@ with tab_browse:
         st.info("尚無資料")
     else:
         names = {s["name"]: s for s in srcs}
-        choice = st.selectbox("法規／規章", list(names))
+        choice = st.selectbox("資料來源", list(names))
         keyword = st.text_input("篩選條文內容（例如：特別休假）")
         src = names[choice]
-        st.caption(f"版本：{src['version']}" + (f"　｜　[全國法規資料庫原文]({src['url']})" if src["url"] else "　｜　虛構範例"))
+        is_interp = src["kind"] in ("interpretation", "guidance")
+        origin = {"law": f"[全國法規資料庫原文]({src['url']})", "interpretation": "來源：勞動部勞動法令查詢系統",
+                  "guidance": "來源：各地勞動主管機關發布之說明（依其轉載規定註明出處）",
+                  "handbook": "虛構範例"}[src["kind"]]
+        st.caption(("精選清單版本" if is_interp else "版本") + f"：{src['version']}　｜　{origin}")
         rows = conn.execute(
             "SELECT flno, title, chapter, content, url FROM articles WHERE code = ? ORDER BY id", (src["code"],)
         ).fetchall()
-        rows = [r for r in rows if not keyword or keyword in r["content"] or keyword in (r["title"] or "")]
-        st.caption(f"共 {len(rows)} 條")
+        rows = [r for r in rows if not keyword or keyword in r["content"] or keyword in (r["title"] or "")
+                or keyword in (r["chapter"] or "")]
+        st.caption(f"共 {len(rows)} " + ("則" if is_interp else "條"))
         for r in rows:
-            title = f"第 {r['flno']} 條" + (f"　{r['title']}" if r["title"] else "") + (f"　｜　{r['chapter']}" if r["chapter"] else "")
+            if src["kind"] == "interpretation":
+                date, topic = (r["chapter"] or "｜").split("｜", 1)
+                title = f"{topic}　｜　{r['title']}（{date}）"
+            elif src["kind"] == "guidance":
+                meta, section = (r["chapter"] or "｜").split("｜", 1)
+                title = f"〈{r['title']}〉{section}　｜　{meta}"
+            else:
+                title = f"第 {r['flno']} 條" + (f"　{r['title']}" if r["title"] else "") + (f"　｜　{r['chapter']}" if r["chapter"] else "")
             with st.expander(title, expanded=bool(keyword)):
                 st.text(r["content"])
+                if is_interp and r["url"]:
+                    st.markdown(f"[原文]({r['url']})")
 
 # ── 資料狀態 ───────────────────────────────────────────────
 with tab_status:
     st.subheader("收錄範圍")
     st.dataframe(
         pd.read_sql_query(
-            """SELECT s.name AS 名稱, CASE s.kind WHEN 'law' THEN '法規' ELSE '公司規章' END AS 類型,
+            """SELECT s.name AS 名稱, CASE s.kind WHEN 'law' THEN '法規' WHEN 'interpretation' THEN '函釋' WHEN 'guidance' THEN '主管機關說明' ELSE '公司規章' END AS 類型,
                       s.version AS 版本, count(a.id) AS 條文數, sum(a.embedding IS NOT NULL) AS 已向量化,
                       s.fetched_at AS 更新時間
                FROM sources s LEFT JOIN articles a ON a.code = s.code GROUP BY s.code ORDER BY s.kind DESC""",

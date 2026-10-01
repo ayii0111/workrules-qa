@@ -14,6 +14,8 @@ load_dotenv(ROOT / ".env")
 
 DB_PATH = Path(os.getenv("WR_DB_PATH", ROOT / "data" / "workrules.db"))
 HANDBOOK_PATH = ROOT / "data" / "handbook.md"
+INTERPRETATIONS_PATH = ROOT / "data" / "interpretations.json"  # 精選的勞動部函釋文號清單
+GUIDANCE_PATH = ROOT / "data" / "guidance.json"  # 精選的主管機關說明文章清單
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
