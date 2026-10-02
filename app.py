@@ -29,7 +29,7 @@ EXAMPLES = [
 
 
 TIPS = f"""
-1. **一次問一個主題**；換主題請按右上角「🗑️ 清除對話」
+1. **一次問一個主題**；換主題請按對話最下方的「🗑️ 清除對話」
 2. 追問只會參考**最近 {conversation.WINDOW} 題**；重新整理頁面會清空對話
 3. **請勿輸入**姓名、身分證字號、薪資明細等個人資料（系統會自動遮蔽身分證、手機與 Email）
 4. 收錄範圍：勞動基準法等 5 部法規、精選勞動部函釋與主管機關說明、公司工作規則（虛構範例）。個案爭議請洽人資或勞工局
@@ -181,6 +181,12 @@ def page_chat():
             render_turn(turn)
         st.session_state.turns.append(turn)
 
+    # 清除對話放在最後一則回覆下方：畫在本輪問答之後，第一題回答完就會出現
+    _, right = st.columns([5, 1])
+    if right.button("🗑️ 清除對話", width="stretch", help="清空目前的對話紀錄，重新開始提問"):
+        st.session_state.turns = []
+        st.rerun()
+
 
 # ── 條文與函釋 ─────────────────────────────────────────────
 def page_browse():
@@ -224,17 +230,11 @@ def page_browse():
 # 改用頂端切換鈕，問答頁的內容（含輸入框）都在頁面最外層，輸入框才能固定在底部
 VIEWS = ["💬 問答", "📚 條文與函釋"]
 st.session_state.setdefault("turns", [])
-nav, action = st.columns([4, 1], vertical_alignment="center")
-view = nav.segmented_control("頁面", VIEWS, default=VIEWS[0], key="view", label_visibility="collapsed")
+view = st.segmented_control("頁面", VIEWS, default=VIEWS[0], key="view", label_visibility="collapsed")
 view = view or st.session_state.get("last_view", VIEWS[0])  # 再點一次已選的項目會取消選取，視為不變
 st.session_state.last_view = view
 
 if view == VIEWS[0]:
-    # 不依對話是否為空來停用按鈕：按鈕在本輪問答「之前」就畫好，若依當時狀態停用，
-    # 第一題回答完後按鈕仍是灰的，要等下一次操作才會恢復。空的時候按下去也無害
-    if action.button("🗑️ 清除對話", width="stretch", help="清空目前的對話紀錄，重新開始提問"):
-        st.session_state.turns = []
-        st.rerun()
     page_chat()
 else:
     page_browse()
