@@ -214,3 +214,70 @@ def test_chat_timeout_is_reported_as_failure_and_timed(monkeypatch):
     assert r.model == "gemini/lite"
     assert [(m, i.kind) for m, i in r.failures] == [("gemini/main", "timeout")]
     assert [s.state for s in p.snapshot()] == ["failed", "running"]
+
+
+# ── 串流 ───────────────────────────────────────────────────
+
+def _fake_stream_models(monkeypatch, behaviour):
+    """behaviour: 模型名稱 → 片段清單（字串）；清單中的例外會在該位置丟出，模擬生成到一半中斷。"""
+    import httpx
+
+    class Stream:
+        def __init__(self, parts):
+            self.parts = parts
+
+        def __iter__(self):
+            for part in self.parts:
+                if isinstance(part, Exception):
+                    raise part
+                delta = type("D", (), {"content": part})()
+                yield type("Chunk", (), {"choices": [type("Ch", (), {"delta": delta})()]})()
+
+        def close(self):
+            pass
+
+    class Client:
+        def __init__(self):
+            self.chat = type("C", (), {"completions": self})()
+
+        def create(self, model, stream=False, **k):
+            assert stream
+            return Stream(behaviour[model])
+
+    provider = llm.config.Provider("gemini", "http://x", "K", tuple(behaviour))
+    monkeypatch.setattr(llm, "available_providers", lambda: [provider])
+    monkeypatch.setattr(llm, "_client", lambda p, *a: Client())
+    return httpx
+
+
+def test_stream_reports_partial_text_and_two_stages(monkeypatch):
+    _fake_stream_models(monkeypatch, {"main": ["特休", "沒休完", "要發工資"]})
+    seen, p = [], Progress()
+    r = llm.chat([{"role": "user", "content": "hi"}], on_text=seen.append, progress=p)
+    assert r.text == "特休沒休完要發工資"
+    assert seen == ["特休", "特休沒休完", "特休沒休完要發工資"]
+    labels = [s.label for s in p.snapshot()]
+    assert labels == ["產生回答（main）：等待回應", "產生回答（main）：生成中"]
+
+
+def test_stream_failure_midway_clears_text_and_falls_back(monkeypatch):
+    httpx = _fake_stream_models(monkeypatch, {
+        "main": ["寫到一半", httpx_timeout()],
+        "lite": ["備用模型的完整回答"],
+    })
+    seen = []
+    r = llm.chat([{"role": "user", "content": "hi"}], on_text=seen.append)
+    assert seen == ["寫到一半", "", "備用模型的完整回答"]   # 中間的空字串讓畫面清掉半段文字
+    assert r.model == "gemini/lite" and r.degraded
+    assert [(m, i.kind) for m, i in r.failures] == [("gemini/main", "timeout")]
+
+
+def test_stream_empty_response_counts_as_failure(monkeypatch):
+    _fake_stream_models(monkeypatch, {"main": [], "lite": ["有內容"]})
+    r = llm.chat([{"role": "user", "content": "hi"}], on_text=lambda t: None)
+    assert r.text == "有內容" and r.failures[0][1].kind == "unavailable"
+
+
+def httpx_timeout():
+    import httpx
+    return httpx.ReadTimeout("read timed out")

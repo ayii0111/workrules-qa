@@ -5,6 +5,7 @@
 
 import re
 import sqlite3
+from collections.abc import Callable
 
 from . import llm
 from .conversation import Turn, context_turns, summarize
@@ -67,22 +68,25 @@ def build_history(turns: list[Turn]) -> str:
 
 
 def ask(conn: sqlite3.Connection, question: str, history: list[Turn] | None = None, *,
-        skip_models: frozenset[str] = frozenset(), progress: Progress | None = None) -> Turn:
+        skip_models: frozenset[str] = frozenset(), progress: Progress | None = None,
+        on_text: Callable[[str], None] | None = None) -> Turn:
     """回答一個問題。question 應已遮蔽個資；history 是這個 session 先前的回合。
 
     - skip_models：這個 session 最近失敗過的模型，先跳過（由介面記錄，見 app.py）
     - progress：各工作階段的計時，介面據此即時顯示讀秒
+    - on_text：有提供時以串流產生回答，介面可以一邊生成一邊顯示
 
     任何情況都回傳一個 Turn（不丟出例外），由 status 表示結果，讓介面能顯示具體原因。
     """
     progress = progress or Progress()
-    turn = _ask(conn, question, history or [], skip_models, progress)
+    turn = _ask(conn, question, history or [], skip_models, progress, on_text)
     progress.finish()
     turn.timeline, turn.total_seconds = progress.snapshot(), progress.total()
     return turn
 
 
-def _ask(conn, question: str, history: list[Turn], skip: frozenset[str], progress: Progress) -> Turn:
+def _ask(conn, question: str, history: list[Turn], skip: frozenset[str], progress: Progress,
+         on_text: Callable[[str], None] | None) -> Turn:
     ctx = context_turns(history)
     notes: list[str] = []
     failures: list = []
@@ -112,7 +116,7 @@ def _ask(conn, question: str, history: list[Turn], skip: frozenset[str], progres
     user += f"【問題】{question}" + (f"\n（依對話脈絡理解為：{rw.query}）" if rw.query != question else "")
     try:
         result = llm.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
-                          skip=skip, progress=progress, stage_label="產生回答")
+                          skip=skip, progress=progress, stage_label="產生回答", on_text=on_text)
     except llm.NoProviderError as e:
         return Turn(question, query=rw.query, answer=e.issue.message, status="error", notes=notes,
                     failures=failures + e.failures)

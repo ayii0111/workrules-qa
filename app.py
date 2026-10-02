@@ -85,24 +85,32 @@ def run_with_timer(question: str) -> conversation.Turn:
     不呼叫任何 Streamlit 函式（Streamlit 的函式只能在主執行緒使用）。
     """
     progress = Progress()
-    result: dict = {}
+    result: dict = {"partial": ""}
     history, skip = list(st.session_state.turns), skip_models()
+
+    def on_text(text: str):
+        result["partial"] = text  # 背景執行緒只寫入資料，由主執行緒負責畫面
 
     def work():
         try:
-            result["turn"] = qa.ask(conn, question, history, skip_models=skip, progress=progress)
+            result["turn"] = qa.ask(conn, question, history, skip_models=skip, progress=progress, on_text=on_text)
         except Exception as e:  # noqa: BLE001 —— 未預期的錯誤也要回到畫面，不能讓讀秒永遠轉下去
             result["error"] = e
 
     worker = threading.Thread(target=work, daemon=True)
     worker.start()
-    board = st.empty()
+    board, answer_box = st.empty(), st.empty()
     while worker.is_alive():
         now = time.time()
         lines = [format_stage(s, now) for s in progress.snapshot()] or ["⏳ 準備中"]
-        board.markdown("  \n".join(lines) + f"  \n**總計 {progress.total():.1f} 秒**")
+        board.caption("  \n".join(lines) + f"  \n總計 {progress.total():.1f} 秒")
+        if result["partial"]:
+            answer_box.markdown(result["partial"] + " ▌")
+        else:
+            answer_box.empty()
         time.sleep(0.2)
     board.empty()
+    answer_box.empty()
     if "error" in result:
         return conversation.Turn(question, answer=f"⚠️ 系統發生未預期的錯誤：{result['error']}", status="error")
     return result["turn"]

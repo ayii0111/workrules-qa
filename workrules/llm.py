@@ -8,8 +8,10 @@
 import logging
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import httpx
 import numpy as np
 from openai import APITimeoutError, OpenAI, OpenAIError, RateLimitError
 
@@ -50,9 +52,19 @@ SHORT_REASON = {"rate_minute": "每分鐘額度已滿", "rate_day": "今日額�
                 "timeout": "無回應，逾時", "unavailable": "暫時無法使用"}
 
 
+class StreamTimeout(Exception):
+    """串流生成超過總時間上限。"""
+
+
+class EmptyResponse(Exception):
+    """模型回應了，但內容是空的。"""
+
+
 def classify_error(exc: Exception) -> ApiIssue:
-    if isinstance(exc, APITimeoutError):
+    if isinstance(exc, (APITimeoutError, httpx.TimeoutException, StreamTimeout)):
         return ApiIssue("timeout")
+    if isinstance(exc, EmptyResponse):
+        return ApiIssue("unavailable")
     text = str(exc)
     if isinstance(exc, RateLimitError) or "429" in text or "RESOURCE_EXHAUSTED" in text:
         if re.search(r"PerDay|per_day|perday", text, re.I):
@@ -79,17 +91,47 @@ class ChatResult:
     failures: list[tuple[str, ApiIssue]] = field(default_factory=list)  # 這次失敗的模型與原因
 
 
-# 單次呼叫最多等多久（秒），依用途分開設定：
-# - 改寫只輸出一句話，通常 1 秒內完成
-# - 回答實測 10~19 秒（回答越長越久），留足餘裕，避免正常運作的模型被誤判為逾時
-# 不在同一個模型上重試：本來就有備用模型可接手，重試只會讓使用者多等（實測主模型無回應時，
-# 原本「等 60 秒＋重試一次」要約 2 分鐘才切換到備用模型）
-TIMEOUTS = {"rewrite": 15, "answer": 40}
-CHAT_TIMEOUT = TIMEOUTS["answer"]
+# ── 逾時設定（2026-10-02 實測）──────────────────────────────
+# 回答用「串流」：模型一邊生成一邊回傳，因此可以把兩件事分開判斷：
+#   1. 伺服器有沒有在處理 → 看「第一個字」多久回來
+#   2. 回答很長、還在生成 → 只要片段持續回來就不算逾時
+# 非串流時，回應要等整段回答寫完才回來，「沒有回應」與「回答比較長」無法區分。
+#
+# 實測（同一題）：完整版 3.5／3.6 會先在伺服器內部思考，第一個字 9.5~11.9 秒才出現，之後片段間隔 ≤ 0.3 秒；
+# 輕量版第一個字約 0.9 秒。所以等第一個字不能設太短，否則正常的模型會被誤判逾時。
+FIRST_TOKEN_TIMEOUT = 25   # 等第一個字、以及片段之間最多等多久（httpx 的 read 逾時，每次讀取都適用）
+STREAM_TOTAL_LIMIT = 90    # 整段生成的總時間上限，只是防止無限卡住的保險
+REWRITE_TIMEOUT = 15       # 改寫不串流：只輸出一句話，輕量版約 1 秒
+# 不在同一個模型上重試：本來就有備用模型可接手，重試只會讓使用者多等
+CHAT_TIMEOUT = REWRITE_TIMEOUT
 
 
-def _client(p: config.Provider, timeout: float = CHAT_TIMEOUT) -> OpenAI:
+def _client(p: config.Provider, timeout: float | httpx.Timeout = CHAT_TIMEOUT) -> OpenAI:
     return OpenAI(api_key=p.api_key, base_url=p.base_url, max_retries=0, timeout=timeout)
+
+
+def _stream(p: config.Provider, model: str, messages: list[dict], temperature: float, progress: Progress,
+            label: str, on_text: Callable[[str], None]) -> str:
+    """串流取得回答。一次嘗試在畫面上分成「等待回應」與「生成中」兩個階段。"""
+    progress.stage(f"{label}（{model}）：等待回應")
+    client = _client(p, httpx.Timeout(FIRST_TOKEN_TIMEOUT, connect=10))
+    start, text = time.time(), ""
+    stream = client.chat.completions.create(model=model, messages=messages, temperature=temperature, stream=True)
+    try:
+        for chunk in stream:
+            if time.time() - start > STREAM_TOTAL_LIMIT:
+                raise StreamTimeout()
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                if not text:
+                    progress.stage(f"{label}（{model}）：生成中")
+                text += delta
+                on_text(text)
+    finally:
+        stream.close()
+    if not text:
+        raise EmptyResponse()
+    return text
 
 
 def available_providers() -> list[config.Provider]:
@@ -103,8 +145,11 @@ def model_name(model: str) -> str:
 
 def chat(messages: list[dict], *, temperature: float = 0.2, purpose: str = "answer",
          skip: set[str] | frozenset[str] = frozenset(), progress: Progress | None = None,
-         stage_label: str = "產生回答") -> ChatResult:
+         stage_label: str = "產生回答", on_text: Callable[[str], None] | None = None) -> ChatResult:
     """依序嘗試各模型。
+
+    - on_text：有提供時用串流，每收到新片段就以「目前累積的全文」呼叫一次；
+      某個模型生成到一半失敗時，會以空字串呼叫一次，讓畫面清掉半段文字，再由下一個模型重來
 
     - purpose="rewrite" 時優先用輕量模型：改寫是簡單任務，而且輕量模型的免費額度與主模型分開計算
     - skip：呼叫端記得最近失敗的模型（只存在該使用者的 session），先跳過，避免每題都重新等一次逾時；
@@ -124,17 +169,21 @@ def chat(messages: list[dict], *, temperature: float = 0.2, purpose: str = "answ
     failures: list[tuple[str, ApiIssue]] = []
     for p, model in usable:
         full = f"{p.name}/{model}"
-        progress.stage(f"{stage_label}（{model}）")
         try:
-            resp = _client(p, TIMEOUTS.get(purpose, CHAT_TIMEOUT)).chat.completions.create(
-                model=model, messages=messages, temperature=temperature)
-            return ChatResult(resp.choices[0].message.content or "", full, degraded=full != preferred,
-                              failures=failures)
-        except OpenAIError as e:
+            if on_text is not None:
+                text = _stream(p, model, messages, temperature, progress, stage_label, on_text)
+            else:
+                progress.stage(f"{stage_label}（{model}）")
+                resp = _client(p).chat.completions.create(model=model, messages=messages, temperature=temperature)
+                text = resp.choices[0].message.content or ""
+            return ChatResult(text, full, degraded=full != preferred, failures=failures)
+        except (OpenAIError, httpx.HTTPError, StreamTimeout, EmptyResponse) as e:
             log.warning("%s 呼叫失敗，改用下一個：%s", full, str(e)[:200])
             issue = classify_error(e)
             failures.append((full, issue))
             progress.fail(SHORT_REASON.get(issue.kind, "失敗"))
+            if on_text is not None:
+                on_text("")  # 清掉這個模型生成到一半的文字
     issues = [i for _, i in failures]
     issue = min(issues, key=lambda x: ISSUE_PRIORITY.index(x.kind) if x.kind in ISSUE_PRIORITY else 99)
     if issue.kind == "rate_minute":  # 多個模型都要等時，取最長的等待時間才保險
