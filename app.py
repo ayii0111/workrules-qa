@@ -2,12 +2,10 @@
 
 import threading
 import time
-from datetime import date
 
-import pandas as pd
 import streamlit as st
 
-from workrules import calc, conversation, db, guard, llm, qa
+from workrules import conversation, db, guard, llm, qa
 from workrules.progress import Progress, format_stage
 
 st.set_page_config(page_title="規章與勞動法規問答助理", page_icon="📘", layout="wide")
@@ -31,7 +29,7 @@ EXAMPLES = [
 
 
 TIPS = f"""
-1. **一次問一個主題**；換主題請按左側「🆕 新對話」
+1. **一次問一個主題**；換主題請按右上角「🗑️ 清除對話」
 2. 追問只會參考**最近 {conversation.WINDOW} 題**；重新整理頁面會清空對話
 3. **請勿輸入**姓名、身分證字號、薪資明細等個人資料（系統會自動遮蔽身分證、手機與 Email）
 4. 收錄範圍：勞動基準法等 5 部法規、精選勞動部函釋與主管機關說明、公司工作規則（虛構範例）。個案爭議請洽人資或勞工局
@@ -141,19 +139,12 @@ def page_chat():
     st.session_state.setdefault("ask_times", [])
     st.session_state.setdefault("cooldown", {})   # 模型 → 暫停使用到何時
 
-    with st.sidebar:
-        if st.button("🆕 新對話", width="stretch", disabled=not st.session_state.turns):
-            st.session_state.turns = []
-            st.rerun()
-        with st.expander("💡 使用小提醒"):
-            st.markdown(TIPS)
-
     # 輸入框放在頁面最外層，Streamlit 才會把它固定在畫面底部；呼叫位置不影響顯示位置
     question = st.chat_input("輸入問題，例如：家人住院需要照顧，可以請什麼假？")
     question = question or st.session_state.pop("pending", None)
 
     if not llm.available_providers():
-        st.warning("尚未設定 LLM API key，問答功能暫時無法使用；試算與條文查詢仍可使用。")
+        st.warning("尚未設定 LLM API key，問答功能暫時無法使用；條文與函釋仍可查詢。")
 
     if not st.session_state.turns and not question:
         # 空白對話：歡迎畫面與範例問題；開始對話後就不再顯示
@@ -166,6 +157,9 @@ def page_chat():
             if cols[i % 2].button(q, width="stretch", key=f"example_{i}"):
                 st.session_state.pending = q
                 st.rerun()
+        st.write("")
+        with st.expander("💡 使用小提醒"):
+            st.markdown(TIPS)
         return
 
     for t in st.session_state.turns:
@@ -182,48 +176,6 @@ def page_chat():
             render_turn(turn)
         st.session_state.turns.append(turn)
 
-
-# ── 試算 ───────────────────────────────────────────────────
-def page_calc():
-    st.title("🧮 試算")
-    st.info("試算由程式依條文公式計算，不經過 AI，結果可重複驗證。僅供參考，實際金額以公司核算為準。")
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("特別休假天數")
-        st.caption("依勞動基準法第 38 條，週年制（依到職日起算）")
-        start = st.date_input("到職日", value=date(2024, 3, 1), min_value=date(1980, 1, 1))
-        on = st.date_input("查詢日", value=date.today())
-        if on < start:
-            st.error("查詢日不能早於到職日")
-        else:
-            months = calc.months_between(start, on)
-            st.metric("目前這一段年資的特休", f"{calc.annual_leave_days(start, on)} 天",
-                      help=f"年資 {months // 12} 年 {months % 12} 個月")
-            sched = calc.leave_schedule(start, years=12)
-            st.dataframe(
-                pd.DataFrame({"取得特休的日期": [d.isoformat() for d, _ in sched],
-                              "年資": ["滿 6 個月"] + [f"滿 {y} 年" for y in range(1, len(sched))],
-                              "天數": [n for _, n in sched]}),
-                hide_index=True, width="stretch", height=250,
-            )
-
-    with right:
-        st.subheader("加班費")
-        st.caption("依勞動基準法第 24 條；時薪 = 月薪 ÷ 30 ÷ 8")
-        salary = st.number_input("月薪（元）", min_value=0, value=36000, step=1000)
-        day_type = st.radio("加班日", ["平日", "休息日"], horizontal=True)
-        max_hours = 4.0 if day_type == "平日" else 12.0
-        hours = st.number_input("加班時數", min_value=0.5, max_value=max_hours, value=2.0, step=0.5)
-        lines = calc.overtime_pay(salary, hours, "workday" if day_type == "平日" else "restday")
-        st.metric("加班費合計", f"{sum(l.amount for l in lines):,} 元",
-                  help=f"時薪 {calc.hourly_wage(salary):,.1f} 元")
-        st.dataframe(
-            pd.DataFrame({"時數": [l.hours for l in lines],
-                          "倍率": [f"{l.rate.numerator}/{l.rate.denominator}" for l in lines],
-                          "金額（元）": [l.amount for l in lines]}),
-            hide_index=True, width="stretch",
-        )
 
 # ── 條文與函釋 ─────────────────────────────────────────────
 def page_browse():
@@ -261,35 +213,23 @@ def page_browse():
             if is_interp and r["url"]:
                 st.markdown(f"[原文]({r['url']})")
 
-# ── 資料狀態 ───────────────────────────────────────────────
-def page_status():
-    st.title("🗂️ 資料狀態")
-    st.subheader("收錄範圍")
-    st.dataframe(
-        pd.read_sql_query(
-            """SELECT s.name AS 名稱, CASE s.kind WHEN 'law' THEN '法規' WHEN 'interpretation' THEN '函釋' WHEN 'guidance' THEN '主管機關說明' ELSE '公司規章' END AS 類型,
-                      s.version AS 版本, count(a.id) AS 條文數, sum(a.embedding IS NOT NULL) AS 已向量化,
-                      s.fetched_at AS 更新時間
-               FROM sources s LEFT JOIN articles a ON a.code = s.code GROUP BY s.code ORDER BY s.kind DESC""",
-            conn,
-        ),
-        hide_index=True, width="stretch",
-    )
-    st.caption("法規每週自動檢查一次；全國法規資料庫的「修正日期」改變時才會重新抓取該部法規。")
-    st.subheader("最近執行紀錄")
-    runs = pd.read_sql_query(
-        "SELECT started_at AS 時間, job AS 步驟, status AS 狀態, n_new AS 更新, message AS 訊息 FROM runs ORDER BY id DESC LIMIT 20",
-        conn,
-    )
-    runs["訊息"] = runs["訊息"].fillna("").map(lambda m: m.split("\n")[0])
-    st.dataframe(runs, hide_index=True, width="stretch")
 
+# ── 頂端切換 ───────────────────────────────────────────────
+# 不用側邊欄，也不用分頁（tabs）：聊天輸入框放在分頁裡時無法固定在畫面底部。
+# 改用頂端切換鈕，問答頁的內容（含輸入框）都在頁面最外層，輸入框才能固定在底部
+VIEWS = ["💬 問答", "📚 條文與函釋"]
+st.session_state.setdefault("turns", [])
+nav, action = st.columns([4, 1], vertical_alignment="center")
+view = nav.segmented_control("頁面", VIEWS, default=VIEWS[0], key="view", label_visibility="collapsed")
+view = view or st.session_state.get("last_view", VIEWS[0])  # 再點一次已選的項目會取消選取，視為不變
+st.session_state.last_view = view
 
-# ── 導覽 ───────────────────────────────────────────────────
-# 用側邊欄切換頁面，而不是分頁（tabs）：聊天輸入框放在分頁裡時無法固定在畫面底部
-st.navigation([
-    st.Page(page_chat, title="問答", icon="💬", default=True),
-    st.Page(page_calc, title="試算", icon="🧮"),
-    st.Page(page_browse, title="條文與函釋", icon="📚"),
-    st.Page(page_status, title="資料狀態", icon="🗂️"),
-]).run()
+if view == VIEWS[0]:
+    # 不依對話是否為空來停用按鈕：按鈕在本輪問答「之前」就畫好，若依當時狀態停用，
+    # 第一題回答完後按鈕仍是灰的，要等下一次操作才會恢復。空的時候按下去也無害
+    if action.button("🗑️ 清除對話", width="stretch", help="清空目前的對話紀錄，重新開始提問"):
+        st.session_state.turns = []
+        st.rerun()
+    page_chat()
+else:
+    page_browse()

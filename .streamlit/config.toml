@@ -2,3 +2,7 @@
 # 啟動後請打開終端機顯示的網址（預設 http://localhost:8501）
 [server]
 headless = true
+
+[theme]
+# 主題色：預設的紅色容易讓人聯想到錯誤，改用沉穩的藍灰色（輸入框焦點、按鈕、連結都會套用）
+primaryColor = "#4A6FA5"

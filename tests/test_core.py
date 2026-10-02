@@ -1,8 +1,4 @@
-from datetime import date
-from fractions import Fraction
-
 from workrules import db, index, sources
-from workrules.calc import annual_leave_days, leave_schedule, months_between, overtime_pay
 from workrules.qa import cited_hits
 from workrules.retrieval import Hit, explicit_refs, keyword_search, rrf
 
@@ -94,52 +90,6 @@ def test_cited_hits_keeps_only_cited_in_order():
     text = "可放 7 天【工作規則 第 9 條、勞動基準法 第 38 條】"
     assert cited_hits(text, [law, other, hb]) == [hb, law]
     assert cited_hits("沒有引用", [law, other]) == [law, other]
-
-
-# ── 試算 ───────────────────────────────────────────────────
-
-def test_months_between_counts_full_months_only():
-    assert months_between(date(2025, 1, 31), date(2025, 7, 30)) == 5
-    assert months_between(date(2025, 1, 31), date(2025, 7, 31)) == 6
-
-
-def test_annual_leave_days_follow_article_38():
-    start = date(2020, 3, 1)
-    cases = {
-        date(2020, 8, 31): 0,   # 未滿 6 個月
-        date(2020, 9, 1): 3,    # 6 個月以上 1 年未滿
-        date(2021, 3, 1): 7,    # 1 年
-        date(2022, 3, 1): 10,   # 2 年
-        date(2024, 3, 1): 14,   # 4 年
-        date(2025, 3, 1): 15,   # 5 年
-        date(2030, 3, 1): 16,   # 10 年
-        date(2045, 3, 1): 30,   # 25 年，上限 30 日
-    }
-    for on, days in cases.items():
-        assert annual_leave_days(start, on) == days, on
-
-
-def test_leave_schedule_handles_month_end():
-    sched = leave_schedule(date(2025, 8, 31), years=1)
-    assert sched[0] == (date(2026, 2, 28), 3)
-    assert sched[1] == (date(2026, 8, 31), 7)
-
-
-def test_overtime_pay_workday_tiers():
-    # 月薪 36,000 → 時薪 150；3 小時 = 2×150×4/3 + 1×150×5/3 = 400 + 250
-    lines = overtime_pay(36000, 3, "workday")
-    assert [(l.hours, l.rate, l.amount) for l in lines] == [(2, Fraction(4, 3), 400), (1, Fraction(5, 3), 250)]
-
-
-def test_overtime_pay_restday_tiers_and_limit():
-    lines = overtime_pay(36000, 10, "restday")
-    assert [l.amount for l in lines] == [400, 1500, 800]
-    try:
-        overtime_pay(36000, 5, "workday")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("平日加班超過 4 小時應該報錯")
 
 
 # ── 函釋 ───────────────────────────────────────────────────

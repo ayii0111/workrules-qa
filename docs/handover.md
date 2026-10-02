@@ -5,7 +5,7 @@
 ## 專案結構
 
 ```
-app.py                      Streamlit 介面（問答、試算、條文查詢、資料狀態）
+app.py                      Streamlit 介面（頂端切換：問答、條文與函釋）
 workrules/
   __main__.py               命令列入口（update / ask / eval / status）
   config.py                 收錄的法規清單、LLM 供應商、路徑
@@ -18,7 +18,6 @@ workrules/
   rewrite.py                追問改寫成獨立問題
   conversation.py           對話回合的資料結構，哪些回合可進入下一輪脈絡
   guard.py                  輸入防護：長度、個資遮蔽、單一 session 提問頻率
-  calc.py                   特休與加班費試算
   evaluate.py               檢索品質評估
   pipeline.py               更新流程：各步驟獨立執行與記錄
 data/
@@ -78,7 +77,7 @@ data/
 
 | 狀況 | 處理 |
 |---|---|
-| 法規網站改版，抓不到條文 | 「資料狀態」會出現 error；修改 `sources.parse_law` 的解析邏輯，並更新測試中的 `LAW_HTML` |
+| 法規網站改版，抓不到條文 | `uv run python -m workrules status` 的執行紀錄會出現 error；修改 `sources.parse_law` 的解析邏輯，並更新測試中的 `LAW_HTML` |
 | LLM 模型被停用（404） | 用環境變數 `GEMINI_CHAT_MODELS` 改模型名稱，不用改程式 |
 | 換了 embedding 模型 | 清空向量後重建：`UPDATE articles SET embedding = NULL`，再執行 update（向量維度不同時，系統會自動退回關鍵字檢索，不會算出錯誤結果） |
 | 員工反映某類問題答不好 | 先把問題加進 `eval_set.json`，確認是「沒找到條文」還是「找到但回答錯」，再決定改檢索還是改提示詞 |
