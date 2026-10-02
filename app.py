@@ -146,20 +146,25 @@ def page_chat():
     if not llm.available_providers():
         st.warning("尚未設定 LLM API key，問答功能暫時無法使用；條文與函釋仍可查詢。")
 
+    # 歡迎畫面整塊放在同一個位置的容器裡。送出第一題時，這個位置在本輪一開始就換成空容器，
+    # 舊的歡迎畫面立刻整塊消失；否則 Streamlit 會讓還沒被新內容覆蓋到的舊元素（範例按鈕、提醒）
+    # 殘留在畫面下方，直到整輪執行（含回答生成）結束才清掉
+    welcome = st.empty()
     if not st.session_state.turns and not question:
         # 空白對話：歡迎畫面與範例問題；開始對話後就不再顯示
-        st.title("📘 規章與勞動法規問答助理")
-        st.markdown("請假、加班、特休、薪資、離職的問題，依據**勞動法規、勞動部函釋與公司工作規則**回答，並附上出處。")
-        st.caption("本站的公司工作規則為虛構範例。回答僅供參考，實際適用以人資部門及主管機關解釋為準。")
-        st.write("")
-        cols = st.columns(2)
-        for i, q in enumerate(EXAMPLES):
-            if cols[i % 2].button(q, width="stretch", key=f"example_{i}"):
-                st.session_state.pending = q
-                st.rerun()
-        st.write("")
-        with st.expander("💡 使用小提醒"):
-            st.markdown(TIPS)
+        with welcome.container():
+            st.title("📘 規章與勞動法規問答助理")
+            st.markdown("請假、加班、特休、薪資、離職的問題，依據**勞動法規、勞動部函釋與公司工作規則**回答，並附上出處。")
+            st.caption("本站的公司工作規則為虛構範例。回答僅供參考，實際適用以人資部門及主管機關解釋為準。")
+            st.write("")
+            cols = st.columns(2)
+            for i, q in enumerate(EXAMPLES):
+                if cols[i % 2].button(q, width="stretch", key=f"example_{i}"):
+                    st.session_state.pending = q
+                    st.rerun()
+            st.write("")
+            with st.expander("💡 使用小提醒"):
+                st.markdown(TIPS)
         return
 
     for t in st.session_state.turns:
