@@ -21,23 +21,17 @@ def get_conn():
 
 conn = get_conn()
 
-st.title("📘 規章與勞動法規問答助理")
-st.caption("員工與主管的請假、加班、特休、離職問題，依據公司工作規則與勞動法規回答，並附上條文出處。"
-           "本站的公司工作規則為虛構範例。")
-
-tab_ask, tab_calc, tab_browse, tab_status = st.tabs(["💬 問答", "🧮 試算", "📚 條文與函釋", "🗂️ 資料狀態"])
-
 # ── 問答 ───────────────────────────────────────────────────
 EXAMPLES = [
     "公司說加班只能換補休不能領錢，這樣合法嗎？",
     "我做滿一年可以放幾天特休？沒休完怎麼辦？",
-    "我想離職，要提前多久跟公司說？",
-    "生理假一年可以請幾天？會扣薪水嗎？",
+    "月薪三萬，月中上兩天班就離職，薪水怎麼算？",
+    "颱風天沒去上班，公司可以扣全勤獎金嗎？",
 ]
 
 
 TIPS = f"""
-1. **一次問一個主題**；換主題請按「🆕 新對話」
+1. **一次問一個主題**；換主題請按左側「🆕 新對話」
 2. 追問只會參考**最近 {conversation.WINDOW} 題**；重新整理頁面會清空對話
 3. **請勿輸入**姓名、身分證字號、薪資明細等個人資料（系統會自動遮蔽身分證、手機與 Email）
 4. 收錄範圍：勞動基準法等 5 部法規、精選勞動部函釋與主管機關說明、公司工作規則（虛構範例）。個案爭議請洽人資或勞工局
@@ -134,22 +128,37 @@ def handle(question: str) -> conversation.Turn:
     return turn
 
 
-with tab_ask:
-    if not llm.available_providers():
-        st.warning("尚未設定 LLM API key，問答功能暫時無法使用；試算與條文查詢仍可使用。")
+def page_chat():
     st.session_state.setdefault("turns", [])
     st.session_state.setdefault("ask_times", [])
     st.session_state.setdefault("cooldown", {})   # 模型 → 暫停使用到何時
 
-    tip_col, new_col = st.columns([5, 1])
-    with tip_col.expander("💡 使用小提醒", expanded=not st.session_state.turns):
-        st.markdown(TIPS)
-    if new_col.button("🆕 新對話", width="stretch", disabled=not st.session_state.turns):
-        st.session_state.turns = []
-        st.rerun()
+    with st.sidebar:
+        if st.button("🆕 新對話", width="stretch", disabled=not st.session_state.turns):
+            st.session_state.turns = []
+            st.rerun()
+        with st.expander("💡 使用小提醒"):
+            st.markdown(TIPS)
 
-    cols = st.columns(len(EXAMPLES))
-    clicked = next((q for col, q in zip(cols, EXAMPLES) if col.button(q, width="stretch")), None)
+    # 輸入框放在頁面最外層，Streamlit 才會把它固定在畫面底部；呼叫位置不影響顯示位置
+    question = st.chat_input("輸入問題，例如：家人住院需要照顧，可以請什麼假？")
+    question = question or st.session_state.pop("pending", None)
+
+    if not llm.available_providers():
+        st.warning("尚未設定 LLM API key，問答功能暫時無法使用；試算與條文查詢仍可使用。")
+
+    if not st.session_state.turns and not question:
+        # 空白對話：歡迎畫面與範例問題；開始對話後就不再顯示
+        st.title("📘 規章與勞動法規問答助理")
+        st.markdown("請假、加班、特休、薪資、離職的問題，依據**勞動法規、勞動部函釋與公司工作規則**回答，並附上出處。")
+        st.caption("本站的公司工作規則為虛構範例。回答僅供參考，實際適用以人資部門及主管機關解釋為準。")
+        st.write("")
+        cols = st.columns(2)
+        for i, q in enumerate(EXAMPLES):
+            if cols[i % 2].button(q, width="stretch", key=f"example_{i}"):
+                st.session_state.pending = q
+                st.rerun()
+        return
 
     for t in st.session_state.turns:
         with st.chat_message("user"):
@@ -157,7 +166,6 @@ with tab_ask:
         with st.chat_message("assistant"):
             render_turn(t)
 
-    question = st.chat_input("輸入問題，例如：家人住院需要照顧，可以請什麼假？") or clicked
     if question:
         with st.chat_message("user"):
             st.markdown(guard.mask_pii(question).text if not guard.too_long(question) else question[:80] + "…")
@@ -166,8 +174,10 @@ with tab_ask:
             render_turn(turn)
         st.session_state.turns.append(turn)
 
+
 # ── 試算 ───────────────────────────────────────────────────
-with tab_calc:
+def page_calc():
+    st.title("🧮 試算")
     st.info("試算由程式依條文公式計算，不經過 AI，結果可重複驗證。僅供參考，實際金額以公司核算為準。")
     left, right = st.columns(2)
 
@@ -207,43 +217,45 @@ with tab_calc:
             hide_index=True, width="stretch",
         )
 
-# ── 條文查詢 ───────────────────────────────────────────────
-with tab_browse:
+# ── 條文與函釋 ─────────────────────────────────────────────
+def page_browse():
+    st.title("📚 條文與函釋")
     srcs = conn.execute("SELECT code, name, kind, version, url FROM sources ORDER BY kind DESC, code").fetchall()
     if not srcs:
         st.info("尚無資料")
-    else:
-        names = {s["name"]: s for s in srcs}
-        choice = st.selectbox("資料來源", list(names))
-        keyword = st.text_input("篩選條文內容（例如：特別休假）")
-        src = names[choice]
-        is_interp = src["kind"] in ("interpretation", "guidance")
-        origin = {"law": f"[全國法規資料庫原文]({src['url']})", "interpretation": "來源：勞動部勞動法令查詢系統",
-                  "guidance": "來源：各地勞動主管機關發布之說明（依其轉載規定註明出處）",
-                  "handbook": "虛構範例"}[src["kind"]]
-        st.caption(("精選清單版本" if is_interp else "版本") + f"：{src['version']}　｜　{origin}")
-        rows = conn.execute(
-            "SELECT flno, title, chapter, content, url FROM articles WHERE code = ? ORDER BY id", (src["code"],)
-        ).fetchall()
-        rows = [r for r in rows if not keyword or keyword in r["content"] or keyword in (r["title"] or "")
-                or keyword in (r["chapter"] or "")]
-        st.caption(f"共 {len(rows)} " + ("則" if is_interp else "條"))
-        for r in rows:
-            if src["kind"] == "interpretation":
-                date, topic = (r["chapter"] or "｜").split("｜", 1)
-                title = f"{topic}　｜　{r['title']}（{date}）"
-            elif src["kind"] == "guidance":
-                meta, section = (r["chapter"] or "｜").split("｜", 1)
-                title = f"〈{r['title']}〉{section}　｜　{meta}"
-            else:
-                title = f"第 {r['flno']} 條" + (f"　{r['title']}" if r["title"] else "") + (f"　｜　{r['chapter']}" if r["chapter"] else "")
-            with st.expander(title, expanded=bool(keyword)):
-                st.text(r["content"])
-                if is_interp and r["url"]:
-                    st.markdown(f"[原文]({r['url']})")
+        return
+    names = {s["name"]: s for s in srcs}
+    choice = st.selectbox("資料來源", list(names))
+    keyword = st.text_input("篩選條文內容（例如：特別休假）")
+    src = names[choice]
+    is_interp = src["kind"] in ("interpretation", "guidance")
+    origin = {"law": f"[全國法規資料庫原文]({src['url']})", "interpretation": "來源：勞動部勞動法令查詢系統",
+              "guidance": "來源：各地勞動主管機關發布之說明（依其轉載規定註明出處）",
+              "handbook": "虛構範例"}[src["kind"]]
+    st.caption(("精選清單版本" if is_interp else "版本") + f"：{src['version']}　｜　{origin}")
+    rows = conn.execute(
+        "SELECT flno, title, chapter, content, url FROM articles WHERE code = ? ORDER BY id", (src["code"],)
+    ).fetchall()
+    rows = [r for r in rows if not keyword or keyword in r["content"] or keyword in (r["title"] or "")
+            or keyword in (r["chapter"] or "")]
+    st.caption(f"共 {len(rows)} " + ("則" if is_interp else "條"))
+    for r in rows:
+        if src["kind"] == "interpretation":
+            date, topic = (r["chapter"] or "｜").split("｜", 1)
+            title = f"{topic}　｜　{r['title']}（{date}）"
+        elif src["kind"] == "guidance":
+            meta, section = (r["chapter"] or "｜").split("｜", 1)
+            title = f"〈{r['title']}〉{section}　｜　{meta}"
+        else:
+            title = f"第 {r['flno']} 條" + (f"　{r['title']}" if r["title"] else "") + (f"　｜　{r['chapter']}" if r["chapter"] else "")
+        with st.expander(title, expanded=bool(keyword)):
+            st.text(r["content"])
+            if is_interp and r["url"]:
+                st.markdown(f"[原文]({r['url']})")
 
 # ── 資料狀態 ───────────────────────────────────────────────
-with tab_status:
+def page_status():
+    st.title("🗂️ 資料狀態")
     st.subheader("收錄範圍")
     st.dataframe(
         pd.read_sql_query(
@@ -263,3 +275,13 @@ with tab_status:
     )
     runs["訊息"] = runs["訊息"].fillna("").map(lambda m: m.split("\n")[0])
     st.dataframe(runs, hide_index=True, width="stretch")
+
+
+# ── 導覽 ───────────────────────────────────────────────────
+# 用側邊欄切換頁面，而不是分頁（tabs）：聊天輸入框放在分頁裡時無法固定在畫面底部
+st.navigation([
+    st.Page(page_chat, title="問答", icon="💬", default=True),
+    st.Page(page_calc, title="試算", icon="🧮"),
+    st.Page(page_browse, title="條文與函釋", icon="📚"),
+    st.Page(page_status, title="資料狀態", icon="🗂️"),
+]).run()
