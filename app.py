@@ -5,7 +5,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from workrules import calc, db, llm, qa
+from workrules import calc, conversation, db, guard, llm, qa
 
 st.set_page_config(page_title="規章與勞動法規問答助理", page_icon="📘", layout="wide")
 
@@ -33,44 +33,84 @@ EXAMPLES = [
 ]
 
 
-def render_answer(ans: qa.Answer):
-    st.markdown(ans.text)
-    if ans.sources:
-        with st.expander(f"📎 引用條文（{len(ans.sources)}）"):
-            for h in ans.sources:
-                head = f"**{h.label}**" + (f"　[原文]({h.url})" if h.url else "")
-                st.markdown(head)
+TIPS = f"""
+1. **一次問一個主題**；換主題請按「🆕 新對話」
+2. 追問只會參考**最近 {conversation.WINDOW} 題**；重新整理頁面會清空對話
+3. **請勿輸入**姓名、身分證字號、薪資明細等個人資料（系統會自動遮蔽身分證、手機與 Email）
+4. 收錄範圍：勞動基準法等 5 部法規、精選勞動部函釋與主管機關說明、公司工作規則（虛構範例）。個案爭議請洽人資或勞工局
+5. 本 demo 使用 Google Gemini **免費方案**，每分鐘與每日都有使用上限；達到上限時畫面會說明需等待多久
+"""
+
+
+def render_turn(turn: conversation.Turn):
+    """依狀態顯示：錯誤與被擋下用醒目的提示框，讓使用者一眼知道發生什麼事。"""
+    if turn.status in ("error", "blocked"):
+        st.warning(turn.answer)
+    elif turn.status == "clarify":
+        st.info(turn.answer)
+    else:
+        st.markdown(turn.answer)
+    if turn.sources:
+        with st.expander(f"📎 引用資料（{len(turn.sources)}）"):
+            for h in turn.sources:
+                st.markdown(f"**{h.label}**" + (f"　[原文]({h.url})" if h.url else ""))
                 st.caption(h.text.split("\n", 1)[-1])
-    if ans.provider:
-        st.caption(f"模型：{ans.provider}")
+    for note in turn.notes:
+        st.caption(f"ℹ️ {note}")
+    if turn.model:
+        st.caption(f"模型：{turn.model}")
+
+
+def handle(question: str) -> conversation.Turn:
+    """輸入防護 → 問答。防護擋下的回合也會顯示，但不會進入之後的對話脈絡（見 conversation.py）。"""
+    if guard.too_long(question):
+        return conversation.Turn(question[:80] + "…", answer=(
+            f"✂️ 問題超過 {guard.MAX_CHARS} 字，請精簡成一個具體的問題再送出；"
+            "不需要貼上整份契約或對話紀錄，描述關鍵情況即可。"), status="blocked")
+    masked = guard.mask_pii(question)
+    wait = guard.wait_seconds(st.session_state.ask_times)
+    if wait:
+        return conversation.Turn(masked.text, answer=(
+            f"⏳ 提問速度較快，為避免超過 Google Gemini 免費方案的每分鐘上限，請約 {wait} 秒後再送出。"),
+            status="blocked")
+    st.session_state.ask_times = guard.record(st.session_state.ask_times)
+    turn = qa.ask(conn, masked.text, st.session_state.turns)
+    if masked.found:
+        turn.notes.insert(0, f"已自動遮蔽您輸入的{'、'.join(masked.found)}，請勿在提問中提供個人資料。")
+    return turn
 
 
 with tab_ask:
     if not llm.available_providers():
         st.warning("尚未設定 LLM API key，問答功能暫時無法使用；試算與條文查詢仍可使用。")
-    if "history" not in st.session_state:
-        st.session_state.history = []
+    st.session_state.setdefault("turns", [])
+    st.session_state.setdefault("ask_times", [])
+
+    tip_col, new_col = st.columns([5, 1])
+    with tip_col.expander("💡 使用小提醒", expanded=not st.session_state.turns):
+        st.markdown(TIPS)
+    if new_col.button("🆕 新對話", width="stretch", disabled=not st.session_state.turns):
+        st.session_state.turns = []
+        st.rerun()
 
     cols = st.columns(len(EXAMPLES))
     clicked = next((q for col, q in zip(cols, EXAMPLES) if col.button(q, width="stretch")), None)
 
-    for role, payload in st.session_state.history:
-        with st.chat_message(role):
-            render_answer(payload) if role == "assistant" else st.markdown(payload)
+    for t in st.session_state.turns:
+        with st.chat_message("user"):
+            st.markdown(t.question)
+        with st.chat_message("assistant"):
+            render_turn(t)
 
     question = st.chat_input("輸入問題，例如：家人住院需要照顧，可以請什麼假？") or clicked
     if question:
-        st.session_state.history.append(("user", question))
         with st.chat_message("user"):
-            st.markdown(question)
+            st.markdown(guard.mask_pii(question).text if not guard.too_long(question) else question[:80] + "…")
         with st.chat_message("assistant"):
-            with st.spinner("查詢條文並整理回答中…"):
-                try:
-                    ans = qa.ask(conn, question)
-                except llm.NoProviderError as e:
-                    ans = qa.Answer(f"⚠️ 目前無法連線到 LLM 服務，請稍後再試。（{e}）", [], None)
-            render_answer(ans)
-        st.session_state.history.append(("assistant", ans))
+            with st.spinner("查詢資料並整理回答中…"):
+                turn = handle(question)
+            render_turn(turn)
+        st.session_state.turns.append(turn)
 
 # ── 試算 ───────────────────────────────────────────────────
 with tab_calc:

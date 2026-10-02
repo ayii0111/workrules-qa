@@ -64,11 +64,28 @@ def keyword_search(conn: sqlite3.Connection, query: str, limit: int = 20) -> lis
     return [r["article_id"] for r in rows]
 
 
+_QUERY_VECTORS: dict[str, np.ndarray] = {}
+_QUERY_CACHE_SIZE = 256
+
+
+def query_vector(query: str) -> np.ndarray | None:
+    """問題轉向量，結果快取：同一句話（例如評估時對同一題比較多種檢索方式）只呼叫一次 API。
+    失敗的結果不快取，下次會重試。"""
+    if query in _QUERY_VECTORS:
+        return _QUERY_VECTORS[query]
+    q = llm.embed([query], max_waits=0)  # 使用者在等，額度不足時不等待，直接退回關鍵字
+    if q is not None:
+        if len(_QUERY_VECTORS) >= _QUERY_CACHE_SIZE:
+            _QUERY_VECTORS.pop(next(iter(_QUERY_VECTORS)))
+        _QUERY_VECTORS[query] = q
+    return q
+
+
 def vector_search(conn: sqlite3.Connection, query: str, limit: int = 20) -> list[int]:
     rows = conn.execute("SELECT id, embedding FROM articles WHERE embedding IS NOT NULL").fetchall()
     if not rows:
         return []
-    q = llm.embed([query])
+    q = query_vector(query)
     if q is None:
         return []
     matrix = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in rows])
@@ -117,27 +134,41 @@ def explicit_refs(conn: sqlite3.Connection, query: str) -> list[int]:
     return ids
 
 
-def rank(conn: sqlite3.Connection, query: str, mode: str = "auto") -> list[int]:
+def rank_with_method(conn: sqlite3.Connection, query: str, mode: str = "auto") -> tuple[list[int], str]:
+    """回傳 (排序後的 id, 實際使用的檢索方式)。auto 模式下向量不可用時，方式會是 keyword_fallback。"""
     if mode == "keyword":
-        return keyword_search(conn, query)
+        return keyword_search(conn, query), "keyword"
     if mode == "vector":
-        return vector_search(conn, query)
+        return vector_search(conn, query), "vector"
     if mode == "hybrid":
         scores = rrf([keyword_search(conn, query), vector_search(conn, query)])
-        return sorted(scores, key=scores.get, reverse=True)
-    ranked = vector_search(conn, query) or keyword_search(conn, query)
+        return sorted(scores, key=scores.get, reverse=True), "hybrid"
+    ranked, method = vector_search(conn, query), "vector"
+    if not ranked:
+        ranked, method = keyword_search(conn, query), "keyword_fallback"
     pinned = explicit_refs(conn, query)
-    return pinned + [a for a in ranked if a not in pinned]
+    return pinned + [a for a in ranked if a not in pinned], method
+
+
+def rank(conn: sqlite3.Connection, query: str, mode: str = "auto") -> list[int]:
+    return rank_with_method(conn, query, mode)[0]
 
 
 def search(conn: sqlite3.Connection, query: str, top_k: int = 8, mode: str = "auto") -> list[Hit]:
-    best = rank(conn, query, mode)[:top_k]
+    return search_with_method(conn, query, top_k, mode)[0]
+
+
+def search_with_method(conn: sqlite3.Connection, query: str, top_k: int = 8,
+                       mode: str = "auto") -> tuple[list[Hit], str]:
+    ranked, method = rank_with_method(conn, query, mode)
+    best = ranked[:top_k]
     if not best:
-        return []
+        return [], method
     rows = {r["id"]: r for r in conn.execute(
         ARTICLE_SQL + f" WHERE a.id IN ({','.join('?' * len(best))})", best)}
-    return [
+    hits = [
         Hit(aid, rows[aid]["code"], rows[aid]["name"], rows[aid]["kind"], rows[aid]["flno"],
             rows[aid]["title"], article_text(rows[aid]), rows[aid]["url"], 1.0 / (i + 1))
         for i, aid in enumerate(best)
     ]
+    return hits, method

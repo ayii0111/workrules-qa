@@ -53,3 +53,39 @@ def report(conn: sqlite3.Connection) -> str:
         if r["misses"]:
             lines.append(f"\n{names[r['mode']]} 沒找到：" + "、".join(r["misses"]))
     return "\n".join(lines)
+
+
+# ── 多輪追問 ───────────────────────────────────────────────
+
+MULTITURN_PATH = config.ROOT / "data" / "eval_multiturn.json"
+
+
+def evaluate_multiturn(conn: sqlite3.Connection, use_rewrite: bool, k: int = 8) -> dict:
+    """比較追問時「只用最後一句檢索」與「先改寫再檢索」。
+
+    先前的問題直接當作查詢句（假設前幾輪本身都是完整問題），只測最後一輪的改寫與檢索。
+    """
+    from .rewrite import rewrite  # 只有評估多輪時才需要，避免一般評估也載入
+
+    cases = json.loads(MULTITURN_PATH.read_text(encoding="utf-8"))
+    hit3 = hitk = 0
+    rows = []
+    for c in cases:
+        query = rewrite(c["history"][-2:], c["q"]).query if use_rewrite else c["q"]
+        keys = article_keys(conn, rank(conn, query)[:k])
+        pos = next((i for i, key in enumerate(keys, start=1) if key in c["expect"]), None)
+        hit3 += bool(pos and pos <= 3)
+        hitk += bool(pos)
+        rows.append((c["history"][-1], c["q"], query, pos))
+    n = len(cases)
+    return {"hit@3": hit3 / n, f"hit@{k}": hitk / n, "rows": rows}
+
+
+def report_multiturn(conn: sqlite3.Connection) -> str:
+    base, rw = evaluate_multiturn(conn, False), evaluate_multiturn(conn, True)
+    lines = [f"多輪追問 {len(rw['rows'])} 題", "", "| 方式 | hit@3 | hit@8 |", "|---|---|---|",
+             f"| 只用最後一句檢索 | {base['hit@3']:.0%} | {base['hit@8']:.0%} |",
+             f"| 先改寫再檢索（本系統） | {rw['hit@3']:.0%} | {rw['hit@8']:.0%} |", ""]
+    for (prev, q, _, p0), (_, _, query, p1) in zip(base["rows"], rw["rows"]):
+        lines.append(f"{'✅' if p1 else '❌'} {prev} → {q}　⇒　「{query}」（名次 {p0 or '-'} → {p1 or '-'}）")
+    return "\n".join(lines)

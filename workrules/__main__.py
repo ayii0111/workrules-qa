@@ -3,7 +3,7 @@
 import argparse
 import logging
 
-from . import db, evaluate, pipeline, qa
+from . import db, evaluate, guard, pipeline, qa
 
 
 def main():
@@ -23,12 +23,16 @@ def main():
             case "update":
                 pipeline.update(conn)
             case "ask":
-                ans = qa.ask(conn, args.question)
-                print(ans.text, "\n")
-                for h in ans.sources:
+                turn = qa.ask(conn, guard.mask_pii(args.question).text)
+                print(turn.answer, "\n")
+                for h in turn.sources:
                     print(f"- {h.label} {h.url or ''}")
+                for n in turn.notes:
+                    print(f"（{n}）")
             case "eval":
                 print(evaluate.report(conn))
+                print()
+                print(evaluate.report_multiturn(conn))
             case "status":
                 for r in conn.execute(
                     "SELECT s.name, s.version, count(a.id) n, sum(a.embedding IS NOT NULL) e "
