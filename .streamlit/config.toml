@@ -1,0 +1,4 @@
+# headless：不自動開啟瀏覽器，也不顯示 Streamlit 自己的推廣提示（例如安裝 AI 助手擴充）
+# 啟動後請打開終端機顯示的網址（預設 http://localhost:8501）
+[server]
+headless = true

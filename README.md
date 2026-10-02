@@ -171,7 +171,7 @@ RAG 的回答品質主要取決於檢索：條文沒被找到，LLM 再強也答
 uv sync
 cp .env.example .env                  # 填入 GEMINI_API_KEY（免費申請：https://aistudio.google.com/apikey）
 uv run python -m workrules update     # 抓取法規、函釋、說明並建立索引（首次約 5 分鐘，受免費額度限制）
-uv run streamlit run app.py           # 開啟網頁介面
+uv run streamlit run app.py           # 啟動網頁介面，再用瀏覽器打開 http://localhost:8501
 ```
 
 其他指令：
