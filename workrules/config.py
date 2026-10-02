@@ -54,14 +54,17 @@ def _models(env: str, default: str) -> tuple[str, ...]:
     return tuple(m.strip() for m in os.getenv(env, default).split(",") if m.strip())
 
 
-# 依序嘗試；前一個失敗（額度用完、服務中斷）就自動換下一個
-# 模型名稱用 *-latest 別名：免費層的舊模型會陸續對新用戶停用，別名會自動指向現行版本
+# 依序嘗試；前一個失敗（額度用完、服務中斷、逾時）就自動換下一個
+# 主模型指定穩定版本，而不用 gemini-flash-latest 別名：別名指向最新版，免費方案最容易塞車
+# （2026-10-02 實測：最新版 3.8 逾時，3.5 約 4 秒、3.6 約 6 秒）。
+# 指定版本日後可能被停用，但停用時 API 會立刻回 404，依序嘗試機制會馬上換下一個，幾乎不影響速度；
+# 最後一個用輕量版的別名保底。可用環境變數 GEMINI_CHAT_MODELS 覆寫，不用改程式
 PROVIDERS = [
     Provider(
         name="gemini",
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         api_key_env="GEMINI_API_KEY",
-        chat_models=_models("GEMINI_CHAT_MODELS", "gemini-flash-latest,gemini-flash-lite-latest"),
+        chat_models=_models("GEMINI_CHAT_MODELS", "gemini-3.5-flash,gemini-3.6-flash,gemini-flash-lite-latest"),
         embed_model=os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001"),
     ),
     Provider(

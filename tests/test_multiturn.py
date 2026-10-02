@@ -143,7 +143,7 @@ def test_chat_falls_back_then_reports_best_issue(monkeypatch):
         return RateLimitError(msg, response=httpx.Response(429, request=httpx.Request("POST", "http://x")), body=None)
 
     FakeClient.current = make_error("429 PerMinute Please retry in 20s")
-    monkeypatch.setattr(llm, "_client", lambda p: FakeClient(None))
+    monkeypatch.setattr(llm, "_client", lambda p, *a: FakeClient(None))
     monkeypatch.setattr(llm, "available_providers", lambda: llm.config.PROVIDERS[:1])
     try:
         llm.chat([{"role": "user", "content": "hi"}])
@@ -151,3 +151,66 @@ def test_chat_falls_back_then_reports_best_issue(monkeypatch):
         assert e.issue.kind == "rate_minute" and e.issue.retry_seconds == 21
     else:
         raise AssertionError("應該丟出 NoProviderError")
+
+
+# ── 工作階段計時與跳過失敗的模型 ─────────────────────────────
+
+from workrules.progress import Progress
+
+
+def test_progress_records_stages_and_failures():
+    p = Progress()
+    p.stage("查詢資料")
+    p.stage("產生回答（A）")
+    p.fail("無回應，逾時")
+    p.stage("產生回答（B）")
+    p.finish()
+    stages = p.snapshot()
+    assert [(s.label, s.state) for s in stages] == [
+        ("查詢資料", "ok"), ("產生回答（A）", "failed"), ("產生回答（B）", "ok")]
+    assert stages[1].note == "無回應，逾時"
+    assert all(s.end is not None for s in stages) and p.finished
+
+
+def _fake_models(monkeypatch, behaviour):
+    """behaviour: 模型名稱 → "ok" 或例外。記錄實際呼叫順序。"""
+    import httpx
+    from openai import APITimeoutError
+    calls = []
+
+    class Client:
+        def __init__(self):
+            self.chat = type("C", (), {"completions": self})()
+
+        def create(self, model, **k):
+            calls.append(model)
+            if behaviour[model] == "timeout":
+                raise APITimeoutError(request=httpx.Request("POST", "http://x"))
+            msg = type("M", (), {"content": f"from {model}"})()
+            return type("R", (), {"choices": [type("Ch", (), {"message": msg})()]})()
+
+    provider = llm.config.Provider("gemini", "http://x", "K", tuple(behaviour))
+    monkeypatch.setattr(llm, "available_providers", lambda: [provider])
+    monkeypatch.setattr(llm, "_client", lambda p, *a: Client())
+    return calls
+
+
+def test_chat_skips_models_marked_by_session(monkeypatch):
+    calls = _fake_models(monkeypatch, {"main": "ok", "lite": "ok"})
+    r = llm.chat([{"role": "user", "content": "hi"}], skip=frozenset({"gemini/main"}))
+    assert calls == ["lite"] and r.degraded
+
+
+def test_chat_ignores_skip_when_everything_is_skipped(monkeypatch):
+    calls = _fake_models(monkeypatch, {"main": "ok", "lite": "ok"})
+    llm.chat([{"role": "user", "content": "hi"}], skip=frozenset({"gemini/main", "gemini/lite"}))
+    assert calls == ["main"]
+
+
+def test_chat_timeout_is_reported_as_failure_and_timed(monkeypatch):
+    _fake_models(monkeypatch, {"main": "timeout", "lite": "ok"})
+    p = Progress()
+    r = llm.chat([{"role": "user", "content": "hi"}], progress=p)
+    assert r.model == "gemini/lite"
+    assert [(m, i.kind) for m, i in r.failures] == [("gemini/main", "timeout")]
+    assert [s.state for s in p.snapshot()] == ["failed", "running"]

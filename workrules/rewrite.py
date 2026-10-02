@@ -6,9 +6,10 @@
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import llm
+from .progress import Progress
 
 PROMPT = """你負責把員工在對話中的「最新問題」改寫成一句不需要上下文也看得懂的獨立問題，用來搜尋勞動法規。
 
@@ -33,6 +34,7 @@ class Rewrite:
     unclear: bool = False
     model: str | None = None
     failed: bool = False  # 改寫失敗時退回原問題
+    failures: list = field(default_factory=list)  # 失敗的模型與原因，交給呼叫端記錄
 
 
 def parse(text: str, question: str) -> Rewrite:
@@ -48,15 +50,18 @@ def parse(text: str, question: str) -> Rewrite:
         return Rewrite(question, failed=True)
 
 
-def rewrite(history_queries: list[str], question: str) -> Rewrite:
+def rewrite(history_queries: list[str], question: str, *, skip: frozenset[str] = frozenset(),
+            progress: Progress | None = None) -> Rewrite:
     if not history_queries:
         return Rewrite(question)
     history = "\n".join(f"- {q}" for q in history_queries)
     try:
         result = llm.chat([{"role": "user", "content": PROMPT.format(history=history, question=question)}],
-                          temperature=0, purpose="rewrite")
-    except llm.NoProviderError:
-        return Rewrite(question, failed=True)
+                          temperature=0, purpose="rewrite", skip=skip, progress=progress, stage_label="理解問題")
+    except llm.NoProviderError as e:
+        r = Rewrite(question, failed=True)
+        r.failures = e.failures
+        return r
     r = parse(result.text, question)
-    r.model = result.model
+    r.model, r.failures = result.model, result.failures
     return r

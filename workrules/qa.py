@@ -8,6 +8,7 @@ import sqlite3
 
 from . import llm
 from .conversation import Turn, context_turns, summarize
+from .progress import Progress
 from .retrieval import Hit, search_with_method
 from .rewrite import rewrite
 
@@ -65,29 +66,44 @@ def build_history(turns: list[Turn]) -> str:
     return "\n".join(f"問：{t.query}\n答（摘要）：{t.summary}" for t in turns)
 
 
-def ask(conn: sqlite3.Connection, question: str, history: list[Turn] | None = None) -> Turn:
+def ask(conn: sqlite3.Connection, question: str, history: list[Turn] | None = None, *,
+        skip_models: frozenset[str] = frozenset(), progress: Progress | None = None) -> Turn:
     """回答一個問題。question 應已遮蔽個資；history 是這個 session 先前的回合。
+
+    - skip_models：這個 session 最近失敗過的模型，先跳過（由介面記錄，見 app.py）
+    - progress：各工作階段的計時，介面據此即時顯示讀秒
 
     任何情況都回傳一個 Turn（不丟出例外），由 status 表示結果，讓介面能顯示具體原因。
     """
-    ctx = context_turns(history or [])
+    progress = progress or Progress()
+    turn = _ask(conn, question, history or [], skip_models, progress)
+    progress.finish()
+    turn.timeline, turn.total_seconds = progress.snapshot(), progress.total()
+    return turn
+
+
+def _ask(conn, question: str, history: list[Turn], skip: frozenset[str], progress: Progress) -> Turn:
+    ctx = context_turns(history)
     notes: list[str] = []
+    failures: list = []
 
     # 1. 追問時改寫成獨立問題
-    rw = rewrite([t.query for t in ctx], question)
+    rw = rewrite([t.query for t in ctx], question, skip=skip, progress=progress)
+    failures += rw.failures
     if rw.unclear:
-        return Turn(question, query=question, answer=CLARIFY, status="clarify", model=rw.model)
+        return Turn(question, query=question, answer=CLARIFY, status="clarify", model=rw.model, failures=failures)
     if rw.failed:
         notes.append("查詢改寫暫時無法使用，本次直接以原問題檢索；追問的準確度可能較低。")
     elif rw.query != question:
         notes.append(f"已依對話脈絡將問題理解為：「{rw.query}」")
 
     # 2. 檢索
+    progress.stage("查詢資料")
     hits, method = search_with_method(conn, rw.query)
     if method == "keyword_fallback":
         notes.append("語意檢索暫時無法使用（可能已達免費額度上限），本次改用關鍵字檢索，準確度可能較低。")
     if not hits:
-        return Turn(question, query=rw.query, answer=REFUSAL + "。", status="refused", notes=notes)
+        return Turn(question, query=rw.query, answer=REFUSAL + "。", status="refused", notes=notes, failures=failures)
 
     # 3. 回答
     user = f"【資料】\n{build_context(hits)}\n\n"
@@ -95,18 +111,23 @@ def ask(conn: sqlite3.Connection, question: str, history: list[Turn] | None = No
         user += f"【先前對話】\n{build_history(ctx)}\n\n"
     user += f"【問題】{question}" + (f"\n（依對話脈絡理解為：{rw.query}）" if rw.query != question else "")
     try:
-        result = llm.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}])
+        result = llm.chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+                          skip=skip, progress=progress, stage_label="產生回答")
     except llm.NoProviderError as e:
-        return Turn(question, query=rw.query, answer=e.issue.message, status="error", notes=notes)
+        return Turn(question, query=rw.query, answer=e.issue.message, status="error", notes=notes,
+                    failures=failures + e.failures)
+    failures += result.failures
     if result.degraded:
-        notes.append(f"主模型暫時無法使用（忙碌或已達免費額度上限），本次由備用模型（{result.model}）回答。")
+        notes.append(f"主模型暫時無法使用（忙碌、逾時或已達免費額度上限），本次由備用模型"
+                     f"（{llm.model_name(result.model)}）回答。")
 
     text = result.text
     # 拒答時檢索到的資料本來就不相關，不列出來避免誤導
     if text.strip().startswith(REFUSAL):
-        return Turn(question, query=rw.query, answer=text, status="refused", notes=notes, model=result.model)
+        return Turn(question, query=rw.query, answer=text, status="refused", notes=notes, model=result.model,
+                    failures=failures)
     return Turn(question, query=rw.query, answer=text, summary=summarize(text), status="ok",
-                sources=cited_hits(text, hits), notes=notes, model=result.model)
+                sources=cited_hits(text, hits), notes=notes, model=result.model, failures=failures)
 
 
 CITATION_RE = re.compile(r"【([^】]+)】")

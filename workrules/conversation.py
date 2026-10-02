@@ -26,6 +26,9 @@ class Turn:
     sources: list = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # 系統狀態說明：降級、改用關鍵字等
     model: str | None = None
+    timeline: list = field(default_factory=list)    # 各工作階段的耗時（progress.Stage）
+    total_seconds: float | None = None
+    failures: list = field(default_factory=list)    # 這一輪失敗的模型與原因，介面用來決定之後先跳過哪些模型
 
 
 def context_turns(turns: list[Turn], window: int = WINDOW) -> list[Turn]:

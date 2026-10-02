@@ -1,11 +1,14 @@
 """Streamlit 介面：uv run streamlit run app.py"""
 
+import threading
+import time
 from datetime import date
 
 import pandas as pd
 import streamlit as st
 
 from workrules import calc, conversation, db, guard, llm, qa
+from workrules.progress import Progress, format_stage
 
 st.set_page_config(page_title="規章與勞動法規問答助理", page_icon="📘", layout="wide")
 
@@ -57,8 +60,58 @@ def render_turn(turn: conversation.Turn):
                 st.caption(h.text.split("\n", 1)[-1])
     for note in turn.notes:
         st.caption(f"ℹ️ {note}")
-    if turn.model:
-        st.caption(f"模型：{turn.model}")
+    if turn.timeline:
+        steps = "　→　".join(
+            f"{'❌ ' if s.state == 'failed' else ''}{s.label} {s.seconds():.1f}s" + (f"（{s.note}）" if s.note else "")
+            for s in turn.timeline)
+        st.caption(f"⏱ 共 {turn.total_seconds:.1f} 秒：{steps}")
+
+
+# 模型失敗後，這個 session 先跳過它多久（秒）。只存在 st.session_state，不與其他使用者共用
+COOLDOWN = {"timeout": 300, "overloaded": 300, "unavailable": 300, "rate_day": 3600}
+
+
+def remember_failures(failures):
+    now = time.time()
+    for model, issue in failures:
+        seconds = (issue.retry_seconds or 60) if issue.kind == "rate_minute" else COOLDOWN.get(issue.kind)
+        if seconds:
+            st.session_state.cooldown[model] = now + seconds
+
+
+def skip_models() -> frozenset[str]:
+    now = time.time()
+    return frozenset(m for m, until in st.session_state.cooldown.items() if until > now)
+
+
+def run_with_timer(question: str) -> conversation.Turn:
+    """問答放在背景執行緒，畫面每 0.2 秒重畫一次各階段的讀秒。
+
+    呼叫 API 時 Streamlit 的畫面會凍結，所以不能在主執行緒等；背景執行緒只更新 Progress 物件，
+    不呼叫任何 Streamlit 函式（Streamlit 的函式只能在主執行緒使用）。
+    """
+    progress = Progress()
+    result: dict = {}
+    history, skip = list(st.session_state.turns), skip_models()
+
+    def work():
+        try:
+            result["turn"] = qa.ask(conn, question, history, skip_models=skip, progress=progress)
+        except Exception as e:  # noqa: BLE001 —— 未預期的錯誤也要回到畫面，不能讓讀秒永遠轉下去
+            result["error"] = e
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    board = st.empty()
+    while worker.is_alive():
+        now = time.time()
+        lines = [format_stage(s, now) for s in progress.snapshot()] or ["⏳ 準備中"]
+        board.markdown("  \n".join(lines) + f"  \n**總計 {progress.total():.1f} 秒**")
+        time.sleep(0.2)
+    board.empty()
+    if "error" in result:
+        return conversation.Turn(question, answer=f"⚠️ 系統發生未預期的錯誤：{result['error']}", status="error")
+    return result["turn"]
 
 
 def handle(question: str) -> conversation.Turn:
@@ -74,7 +127,8 @@ def handle(question: str) -> conversation.Turn:
             f"⏳ 提問速度較快，為避免超過 Google Gemini 免費方案的每分鐘上限，請約 {wait} 秒後再送出。"),
             status="blocked")
     st.session_state.ask_times = guard.record(st.session_state.ask_times)
-    turn = qa.ask(conn, masked.text, st.session_state.turns)
+    turn = run_with_timer(masked.text)
+    remember_failures(turn.failures)
     if masked.found:
         turn.notes.insert(0, f"已自動遮蔽您輸入的{'、'.join(masked.found)}，請勿在提問中提供個人資料。")
     return turn
@@ -85,6 +139,7 @@ with tab_ask:
         st.warning("尚未設定 LLM API key，問答功能暫時無法使用；試算與條文查詢仍可使用。")
     st.session_state.setdefault("turns", [])
     st.session_state.setdefault("ask_times", [])
+    st.session_state.setdefault("cooldown", {})   # 模型 → 暫停使用到何時
 
     tip_col, new_col = st.columns([5, 1])
     with tip_col.expander("💡 使用小提醒", expanded=not st.session_state.turns):
@@ -107,8 +162,7 @@ with tab_ask:
         with st.chat_message("user"):
             st.markdown(guard.mask_pii(question).text if not guard.too_long(question) else question[:80] + "…")
         with st.chat_message("assistant"):
-            with st.spinner("查詢資料並整理回答中…"):
-                turn = handle(question)
+            turn = handle(question)
             render_turn(turn)
         st.session_state.turns.append(turn)
 
