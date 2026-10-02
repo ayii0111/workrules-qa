@@ -14,13 +14,19 @@ workrules/
   text.py                   中文斷詞（含人資用語詞典）
   index.py                  全文索引與向量
   retrieval.py              檢索策略（條號直達 + 向量，退回關鍵字）
-  qa.py                     問答提示詞、引用條文解析
+  qa.py                     問答流程、提示詞、引用解析
+  rewrite.py                追問改寫成獨立問題
+  conversation.py           對話回合的資料結構，哪些回合可進入下一輪脈絡
+  guard.py                  輸入防護：長度、個資遮蔽、單一 session 提問頻率
   calc.py                   特休與加班費試算
   evaluate.py               檢索品質評估
   pipeline.py               更新流程：各步驟獨立執行與記錄
 data/
   handbook.md               公司工作規則（虛構範例）
+  interpretations.json      精選函釋的文號清單（原文由程式從勞動部抓取）
+  guidance.json             主管機關說明文章清單（網址、擷取範圍）
   eval_set.json             檢索評估題目
+  eval_multiturn.json       多輪追問評估題目
   workrules.db              資料庫（提交進 repo，部署時直接使用）
 .github/workflows/weekly.yml 每週檢查法規更新
 ```
@@ -53,6 +59,16 @@ data/
 1. 到[全國法規資料庫](https://law.moj.gov.tw/)找到法規，網址中的 `pcode=` 就是法規代碼
 2. 加進 `config.py` 的 `LAWS`
 3. 執行 `uv run python -m workrules update`
+
+## 新增函釋或主管機關說明
+
+- **函釋**：在[勞動部勞動法令查詢系統](https://laws.mol.gov.tw/)找到函釋，把文號中的數字（例如 `1140149454`）與主題加進 `data/interpretations.json`
+- **說明文章**：在 `data/guidance.json` 加一筆，填網址、發布機關、日期、文章標題（擷取起點），以及下一篇文章的標題（擷取終點）
+- 執行 `uv run python -m workrules update`：清單內容有變才會重新抓取
+
+## 多輪對話的規則
+
+見[設計文件](design-multiturn.md)。修改時特別注意：錯誤、被擋下、需澄清的回合不能進入對話脈絡（`conversation.context_turns`）。
 
 ## 修改檢索或提示詞之後
 
